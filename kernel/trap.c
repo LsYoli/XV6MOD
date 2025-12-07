@@ -80,8 +80,8 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  // give up the CPU if this is a timer interrupt and time slice expired.
+  if(which_dev == 2 && mlfq_tick(p))
     yield();
 
   prepare_return();
@@ -152,7 +152,7 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
+  if(which_dev == 2 && myproc() != 0 && mlfq_tick(myproc()))
     yield();
 
   // the yield() may have caused some traps to occur,
