@@ -68,15 +68,34 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct run *r, *best = 0, *prev = 0, *bestprev = 0;
+  int bestlen = 0;
 
   acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+  for(r = kmem.freelist; r; ){
+    int len = 1;
+    struct run *end = r;
+    while(end->next && (uint64)end->next == (uint64)end + PGSIZE){
+      end = end->next;
+      len++;
+    }
+    if(best == 0 || len < bestlen){
+      best = r;
+      bestprev = prev;
+      bestlen = len;
+    }
+    prev = end;
+    r = end->next;
+  }
+  if(best){
+    if(bestprev)
+      bestprev->next = best->next;
+    else
+      kmem.freelist = best->next;
+  }
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  if(best)
+    memset((char*)best, 5, PGSIZE); // fill with junk
+  return (void*)best;
 }
