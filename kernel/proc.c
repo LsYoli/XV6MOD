@@ -15,6 +15,10 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+#define NQUEUE 3
+static int qstart[NQUEUE];
+static int qquantum[NQUEUE] = {1, 2, 4};
+
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
@@ -55,6 +59,8 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      p->priority = 0;
+      p->ticks_used = 0;
   }
 }
 
@@ -145,6 +151,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->priority = 0;
+  p->ticks_used = 0;
 
   return p;
 }
@@ -169,6 +177,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->priority = 0;
+  p->ticks_used = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -437,28 +447,35 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    int ran = 0;
+    for(int level = 0; level < NQUEUE && !ran; level++) {
+      for(int i = 0; i < NPROC; i++) {
+        int idx = (i + qstart[level]) % NPROC;
+        p = &proc[idx];
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          if(p->state == RUNNABLE) {
+            p->ticks_used++;
+            if(p->ticks_used >= qquantum[level] && p->priority < NQUEUE-1) {
+              p->priority++;
+              p->ticks_used = 0;
+            }
+          } else if(p->state == SLEEPING && p->priority > 0) {
+            p->priority--;
+            p->ticks_used = 0;
+          }
+          qstart[level] = (idx + 1) % NPROC;
+          ran = 1;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+    if(!ran)
       asm volatile("wfi");
-    }
   }
 }
 
@@ -627,6 +644,32 @@ killed(struct proc *p)
   k = p->killed;
   release(&p->lock);
   return k;
+}
+
+int
+getpinfo(uint64 addr, int max)
+{
+  struct proc *p;
+  struct pinfo pi;
+  int used = 0;
+
+  for(p = proc; p < &proc[NPROC] && used < max; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      pi.pid = p->pid;
+      pi.state = p->state;
+      pi.priority = p->priority;
+      pi.queue = p->priority;
+      pi.ticks = p->ticks_used;
+      if(copyout(myproc()->pagetable, addr + used * sizeof(pi), (char *)&pi, sizeof(pi)) < 0) {
+        release(&p->lock);
+        return -1;
+      }
+      used++;
+    }
+    release(&p->lock);
+  }
+  return used;
 }
 
 // Copy to either a user address, or kernel address,
