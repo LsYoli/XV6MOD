@@ -1,0 +1,5 @@
+set confirm off
+set architecture riscv:rv64
+disassemble next-line on
+target remote localhost:1234
+symbol-file kernel/kernel

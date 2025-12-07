@@ -16,6 +16,7 @@ extern char end[]; // first address after kernel.
 
 struct run {
   struct run *next;
+  uint64 size; // size in pages
 };
 
 struct {
@@ -55,10 +56,34 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
+  r->size = 1;
 
   acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+
+  // Insert into sorted free list.
+  struct run *prev = 0, *curr = kmem.freelist;
+  while(curr && (uint64)curr < (uint64)r){
+    prev = curr;
+    curr = curr->next;
+  }
+  r->next = curr;
+  if(prev)
+    prev->next = r;
+  else
+    kmem.freelist = r;
+
+  // Coalesce with next block.
+  if(r->next && (char*)r + r->size * PGSIZE == (char*)r->next){
+    r->size += r->next->size;
+    r->next = r->next->next;
+  }
+
+  // Coalesce with previous block.
+  if(prev && (char*)prev + prev->size * PGSIZE == (char*)r){
+    prev->size += r->size;
+    prev->next = r->next;
+  }
+
   release(&kmem.lock);
 }
 
@@ -68,15 +93,48 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct run *r = 0, *prev = 0, *best = 0, *bestprev = 0;
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+
+  // Find best-fit block (smallest that still fits one page).
+  while(r) {
+    if(r->size >= 1 && (best == 0 || r->size < best->size)) {
+      best = r;
+      bestprev = prev;
+      if(r->size == 1)
+        break;
+    }
+    prev = r;
+    r = r->next;
+  }
+
+  if(best == 0){
+    release(&kmem.lock);
+    return 0;
+  }
+
+  void *pa = (void*)best;
+  if(best->size == 1){
+    // Remove block from list.
+    if(bestprev)
+      bestprev->next = best->next;
+    else
+      kmem.freelist = best->next;
+  } else {
+    // Split block: allocate first page and keep remainder.
+    struct run *newblock = (struct run*)((char*)best + PGSIZE);
+    newblock->size = best->size - 1;
+    newblock->next = best->next;
+    if(bestprev)
+      bestprev->next = newblock;
+    else
+      kmem.freelist = newblock;
+  }
+
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  memset(pa, 5, PGSIZE); // fill with junk
+  return pa;
 }

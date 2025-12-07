@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "uprocs.h"
+
+static const int mlfq_quanta[3] = {1, 2, 4};
+static void mlfq_bump_for_io(struct proc *p);
 
 struct cpu cpus[NCPU];
 
@@ -89,6 +93,35 @@ myproc(void)
   return p;
 }
 
+// Update tick accounting for MLFQ. Returns 1 if the current
+// time slice expired and the scheduler should run.
+int
+mlfq_tick(struct proc *p)
+{
+  if(p == 0)
+    return 0;
+
+  p->ticks[p->priority]++;
+  p->ticks_used++;
+
+  if(p->ticks_used >= mlfq_quanta[p->priority]) {
+    p->ticks_used = 0;
+    p->priority = mlfq_clamp(p->priority + 1);
+    return 1;
+  }
+  return 0;
+}
+
+static void
+mlfq_bump_for_io(struct proc *p)
+{
+  if(p == 0)
+    return;
+  if(p->ticks_used < mlfq_quanta[p->priority])
+    p->priority = mlfq_clamp(p->priority - 1);
+  p->ticks_used = 0;
+}
+
 int
 allocpid()
 {
@@ -124,6 +157,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->priority = 0;
+  p->ticks_used = 0;
+  for(int i = 0; i < 3; i++)
+    p->ticks[i] = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +206,10 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->priority = 0;
+  p->ticks_used = 0;
+  for(int i = 0; i < 3; i++)
+    p->ticks[i] = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -438,22 +479,27 @@ scheduler(void)
     intr_off();
 
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+    for(int level = 0; level < 3 && found == 0; level++) {
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->ticks_used = 0;
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+          found = 1;
+        }
+        release(&p->lock);
+        if(found)
+          break;
       }
-      release(&p->lock);
     }
     if(found == 0) {
       // nothing to run; stop running on this core until an interrupt.
@@ -495,6 +541,7 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  mlfq_bump_for_io(p);
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -555,6 +602,7 @@ sleep(void *chan, struct spinlock *lk)
   release(lk);
 
   // Go to sleep.
+  mlfq_bump_for_io(p);
   p->chan = chan;
   p->state = SLEEPING;
 
@@ -627,6 +675,37 @@ killed(struct proc *p)
   k = p->killed;
   release(&p->lock);
   return k;
+}
+
+// Copy process snapshots into user memory.
+int
+ps(uint64 addr, int max)
+{
+  struct proc *p;
+  struct uproc u;
+  int count = 0;
+  struct proc *cur = myproc();
+
+  for(p = proc; p < &proc[NPROC] && count < max; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      u.pid = p->pid;
+      u.priority = p->priority;
+      u.queue = p->priority;
+      for(int i = 0; i < 3; i++)
+        u.ticks[i] = p->ticks[i];
+      u.state = p->state;
+      release(&p->lock);
+
+      if(copyout(cur->pagetable, addr + count * sizeof(struct uproc),
+                 (char *)&u, sizeof(struct uproc)) < 0)
+        return -1;
+      count++;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return count;
 }
 
 // Copy to either a user address, or kernel address,
