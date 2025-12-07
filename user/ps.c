@@ -1,3 +1,4 @@
+#include "kernel/types.h"
 #include "user.h"
 
 static char *states[] = {"unused", "used", "sleep", "runbl", "run", "zomb"};
