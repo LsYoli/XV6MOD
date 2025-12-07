@@ -441,11 +441,8 @@ scheduler(void)
   for(;;){
     // The most recent process to run may have had interrupts
     // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
+    // processes are waiting.
     intr_on();
-    intr_off();
 
     int ran = 0;
     for(int level = 0; level < NQUEUE && !ran; level++) {
@@ -459,8 +456,7 @@ scheduler(void)
           swtch(&c->context, &p->context);
           c->proc = 0;
           if(p->state == RUNNABLE) {
-            p->ticks_used++;
-            if(p->ticks_used >= qquantum[level] && p->priority < NQUEUE-1) {
+            if(++p->ticks_used >= qquantum[level] && p->priority < NQUEUE-1) {
               p->priority++;
               p->ticks_used = 0;
             }

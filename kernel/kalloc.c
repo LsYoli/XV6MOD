@@ -69,14 +69,23 @@ void *
 kalloc(void)
 {
   struct run *r, *best = 0, *prev = 0, *bestprev = 0;
+  int bestlen = 0;
 
   acquire(&kmem.lock);
-  for(r = kmem.freelist; r; r = r->next){
-    if(best == 0 || (uint64)r < (uint64)best){
+  for(r = kmem.freelist; r; ){
+    int len = 1;
+    struct run *end = r;
+    while(end->next && (uint64)end->next == (uint64)end + PGSIZE){
+      end = end->next;
+      len++;
+    }
+    if(best == 0 || len < bestlen){
       best = r;
       bestprev = prev;
+      bestlen = len;
     }
-    prev = r;
+    prev = end;
+    r = end->next;
   }
   if(best){
     if(bestprev)
