@@ -10,6 +10,10 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
+#define NQUEUE 3
+static int quantums[NQUEUE] = {1, 2, 4};
+static int last[NQUEUE];
+
 struct proc *initproc;
 
 int nextpid = 1;
@@ -124,6 +128,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->priority = 0;
+  p->ticks = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +175,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->priority = 0;
+  p->ticks = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -289,6 +297,8 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  np->priority = p->priority;
+  np->ticks = 0;
 
   pid = np->pid;
 
@@ -365,6 +375,21 @@ kexit(int status)
   panic("zombie exit");
 }
 
+void
+mlfqtick(void)
+{
+  struct proc *p = myproc();
+  if(p == 0 || p->state != RUNNING)
+    return;
+  p->ticks++;
+  int limit = quantums[p->priority];
+  if(p->ticks >= limit){
+    p->ticks = 0;
+    if(p->priority + 1 < NQUEUE)
+      p->priority++;
+  }
+}
+
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
@@ -426,6 +451,7 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
+  int i, level;
 
   c->proc = 0;
   for(;;){
@@ -438,27 +464,25 @@ scheduler(void)
     intr_off();
 
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    for(level = 0; level < NQUEUE && !found; level++) {
+      for(i = 0; i < NPROC; i++) {
+        int idx = (last[level] + 1 + i) % NPROC;
+        p = &proc[idx];
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          p->ticks = 0;
+          p->state = RUNNING;
+          c->proc = p;
+          last[level] = idx;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          found = 1;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
     }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+    if(found == 0)
       asm volatile("wfi");
-    }
   }
 }
 
@@ -557,6 +581,8 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  p->ticks = 0;
+  p->priority = 0;
 
   sched();
 
@@ -676,7 +702,7 @@ procdump(void)
   struct proc *p;
   char *state;
 
-  printf("\n");
+  printf("\nPID state prio queue ticks name\n");
   for(p = proc; p < &proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;
@@ -684,7 +710,6 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    printf("%d %s %s", p->pid, state, p->name);
-    printf("\n");
+    printf("%d %s %d %d %d %s\n", p->pid, state, p->priority, p->priority, p->ticks, p->name);
   }
 }

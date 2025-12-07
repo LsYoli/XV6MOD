@@ -68,12 +68,19 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct run *r, **p, **best = 0;
 
   acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+  for(p = &kmem.freelist; *p; p = &(*p)->next){
+    if(best == 0 || (uint64)*p < (uint64)*best)
+      best = p;
+  }
+  if(best){
+    r = *best;
+    *best = r->next;
+  } else {
+    r = 0;
+  }
   release(&kmem.lock);
 
   if(r)

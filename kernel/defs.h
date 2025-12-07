@@ -80,6 +80,7 @@ void            printfinit(void);
 // proc.c
 int             cpuid(void);
 void            kexit(int);
+void            mlfqtick(void);
 int             kfork(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
