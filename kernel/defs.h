@@ -104,6 +104,17 @@ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 
+// cpu.c
+void            cpu_track_burst(uint);
+uint            cpu_last_burst(void);
+
+// io.c
+void            io_note_event(int);
+int             io_last_event(void);
+
+// mis.c
+int             mlfq_clamp(int);
+
 // swtch.S
 void            swtch(struct context*, struct context*);
 

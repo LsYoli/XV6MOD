@@ -107,6 +107,6 @@ struct proc {
 
   // MLFQ scheduling
   int priority;                // Current priority level (0 highest)
-  int cur_ticks;               // Ticks consumed in current time slice
+  int ticks_used;              // Ticks consumed in current time slice
   uint64 ticks[3];             // Accumulated ticks per level
 };

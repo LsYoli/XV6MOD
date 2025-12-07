@@ -8,6 +8,7 @@
 #include "uprocs.h"
 
 static const int mlfq_quanta[3] = {1, 2, 4};
+static void mlfq_bump_for_io(struct proc *p);
 
 struct cpu cpus[NCPU];
 
@@ -101,15 +102,24 @@ mlfq_tick(struct proc *p)
     return 0;
 
   p->ticks[p->priority]++;
-  p->cur_ticks++;
+  p->ticks_used++;
 
-  if(p->cur_ticks >= mlfq_quanta[p->priority]) {
-    p->cur_ticks = 0;
-    if(p->priority < 2)
-      p->priority++;
+  if(p->ticks_used >= mlfq_quanta[p->priority]) {
+    p->ticks_used = 0;
+    p->priority = mlfq_clamp(p->priority + 1);
     return 1;
   }
   return 0;
+}
+
+static void
+mlfq_bump_for_io(struct proc *p)
+{
+  if(p == 0)
+    return;
+  if(p->ticks_used < mlfq_quanta[p->priority])
+    p->priority = mlfq_clamp(p->priority - 1);
+  p->ticks_used = 0;
 }
 
 int
@@ -148,7 +158,7 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->priority = 0;
-  p->cur_ticks = 0;
+  p->ticks_used = 0;
   for(int i = 0; i < 3; i++)
     p->ticks[i] = 0;
 
@@ -197,7 +207,7 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
   p->priority = 0;
-  p->cur_ticks = 0;
+  p->ticks_used = 0;
   for(int i = 0; i < 3; i++)
     p->ticks[i] = 0;
 }
@@ -476,7 +486,7 @@ scheduler(void)
           // Switch to chosen process.  It is the process's job
           // to release its lock and then reacquire it
           // before jumping back to us.
-          p->cur_ticks = 0;
+          p->ticks_used = 0;
           p->state = RUNNING;
           c->proc = p;
           swtch(&c->context, &p->context);
@@ -531,6 +541,7 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  mlfq_bump_for_io(p);
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -591,6 +602,7 @@ sleep(void *chan, struct spinlock *lk)
   release(lk);
 
   // Go to sleep.
+  mlfq_bump_for_io(p);
   p->chan = chan;
   p->state = SLEEPING;
 
