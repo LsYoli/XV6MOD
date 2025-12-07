@@ -107,3 +107,15 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_ps(void)
+{
+  uint64 addr;
+  int max;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &max) < 0)
+    return -1;
+
+  return ps(addr, max);
+}

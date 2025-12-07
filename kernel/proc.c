@@ -8,6 +8,9 @@
 
 struct cpu cpus[NCPU];
 
+#define MLFQ_LEVELS 3
+static const int quanta[MLFQ_LEVELS] = {1, 2, 4};
+
 struct proc proc[NPROC];
 
 struct proc *initproc;
@@ -19,6 +22,15 @@ extern void forkret(void);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+
+static char *states[] = {
+[UNUSED]    "unused",
+[USED]      "used",
+[SLEEPING]  "sleep ",
+[RUNNABLE]  "runble",
+[RUNNING]   "run   ",
+[ZOMBIE]    "zombie"
+};
 
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
@@ -146,6 +158,10 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->priority = 0;
+  p->qtime = 0;
+  p->ticks[0] = p->ticks[1] = p->ticks[2] = 0;
+
   return p;
 }
 
@@ -168,7 +184,27 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->priority = 0;
+  p->qtime = 0;
+  p->ticks[0] = p->ticks[1] = p->ticks[2] = 0;
   p->state = UNUSED;
+}
+
+void
+mlfq_tick(struct proc *p)
+{
+  if(p == 0 || p->state != RUNNING)
+    return;
+
+  p->ticks[p->priority]++;
+  p->qtime++;
+
+  if(p->qtime >= quanta[p->priority]) {
+    if(p->priority < MLFQ_LEVELS - 1)
+      p->priority++;
+    p->qtime = 0;
+    yield();
+  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -438,22 +474,20 @@ scheduler(void)
     intr_off();
 
     int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    for(int level = 0; level < MLFQ_LEVELS; level++) {
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          found = 1;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
+      if(found)
+        break;
     }
     if(found == 0) {
       // nothing to run; stop running on this core until an interrupt.
@@ -495,6 +529,7 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+  p->qtime = 0;
   p->state = RUNNABLE;
   sched();
   release(&p->lock);
@@ -557,6 +592,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  p->qtime = 0;
 
   sched();
 
@@ -659,20 +695,41 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
   }
 }
 
+int
+ps(uint64 addr, int max)
+{
+  struct proc *p;
+  struct uproc up;
+  int count = 0;
+
+  for(p = proc; p < &proc[NPROC] && count < max; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      up.pid = p->pid;
+      up.priority = p->priority;
+      up.queue = p->priority;
+      up.ticks[0] = p->ticks[0];
+      up.ticks[1] = p->ticks[1];
+      up.ticks[2] = p->ticks[2];
+      safestrcpy(up.state, states[p->state], sizeof(up.state));
+      release(&p->lock);
+
+      if(copyout(myproc()->pagetable, addr + count * sizeof(struct uproc), (char*)&up, sizeof(up)) < 0)
+        return -1;
+      count++;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return count;
+}
+
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
 // No lock to avoid wedging a stuck machine further.
 void
 procdump(void)
 {
-  static char *states[] = {
-  [UNUSED]    "unused",
-  [USED]      "used",
-  [SLEEPING]  "sleep ",
-  [RUNNABLE]  "runble",
-  [RUNNING]   "run   ",
-  [ZOMBIE]    "zombie"
-  };
   struct proc *p;
   char *state;
 

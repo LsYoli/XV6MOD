@@ -13,3 +13,11 @@
 #define MAXPATH      128   // maximum file path name
 #define USERSTACK    1     // user stack pages
 
+struct uproc {
+  int pid;
+  int priority;
+  int queue;
+  uint64 ticks[3];
+  char state[16];
+};
+
