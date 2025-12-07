@@ -12,6 +12,8 @@ struct proc proc[NPROC];
 
 struct proc *initproc;
 
+int mlfq_quanta[3] = {1, 2, 4};
+
 int nextpid = 1;
 struct spinlock pid_lock;
 
@@ -124,6 +126,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->priority = 0;
+  p->currentslice = 0;
+  for(int i = 0; i < 3; i++)
+    p->ticks[i] = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +175,10 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->priority = 0;
+  p->currentslice = 0;
+  for(int i = 0; i < 3; i++)
+    p->ticks[i] = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -289,6 +299,10 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  np->priority = p->priority;
+  np->currentslice = 0;
+  for(i = 0; i < 3; i++)
+    np->ticks[i] = 0;
 
   pid = np->pid;
 
@@ -437,25 +451,31 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+    int ran = 0;
+    for(int level = 0; level < 3 && !ran; level++) {
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE && p->priority == level) {
+          int current_level = level;
+          p->state = RUNNING;
+          p->currentslice = 0;
+          c->proc = p;
+          swtch(&c->context, &p->context);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+          c->proc = 0;
+          // demote if it used its full quantum
+          if(p->state == RUNNABLE && p->currentslice >= mlfq_quanta[current_level] && p->priority < 2)
+            p->priority++;
+          if(p->state != RUNNING)
+            p->currentslice = 0;
+          ran = 1;
+        }
+        release(&p->lock);
+        if(ran)
+          break;
       }
-      release(&p->lock);
     }
-    if(found == 0) {
+    if(!ran) {
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
     }
@@ -557,6 +577,9 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  p->currentslice = 0;
+  if(p->priority > 0)
+    p->priority--; // simple aging for interactive tasks
 
   sched();
 
@@ -657,6 +680,37 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
     memmove(dst, (char*)src, len);
     return 0;
   }
+}
+
+int
+psinfo(uint64 addr, int max)
+{
+  struct proc *p = myproc();
+  struct uproc u;
+  int count = 0;
+
+  if(max > NPROC)
+    max = NPROC;
+
+  for(struct proc *it = proc; it < &proc[NPROC] && count < max; it++){
+    acquire(&it->lock);
+    if(it->state != UNUSED){
+      u.pid = it->pid;
+      u.priority = it->priority;
+      u.queue = it->priority;
+      for(int i = 0; i < 3; i++)
+        u.ticks[i] = it->ticks[i];
+      u.state = it->state;
+      if(copyout(p->pagetable, addr + count*sizeof(u), (char*)&u, sizeof(u)) < 0){
+        release(&it->lock);
+        return -1;
+      }
+      count++;
+    }
+    release(&it->lock);
+  }
+
+  return count;
 }
 
 // Print a process listing to console.  For debugging.

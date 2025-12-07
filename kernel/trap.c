@@ -81,8 +81,12 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2){
+    p->ticks[p->priority]++;
+    p->currentslice++;
+    if(p->currentslice >= mlfq_quanta[p->priority])
+      yield();
+  }
 
   prepare_return();
 

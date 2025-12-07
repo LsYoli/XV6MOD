@@ -14,14 +14,46 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-struct run {
-  struct run *next;
+struct block {
+  struct block *next;
+  char *start;
+  int pages;
 };
 
 struct {
   struct spinlock lock;
-  struct run *freelist;
+  struct block *freelist;
 } kmem;
+
+#define MAXBLOCKS ((PHYSTOP - (uint64)end) / PGSIZE)
+static struct block blocks[MAXBLOCKS];
+static int block_count = 0;
+static struct block *meta_free = 0;
+
+static struct block*
+alloc_block(char *start, int pages)
+{
+  struct block *b;
+  if(meta_free){
+    b = meta_free;
+    meta_free = meta_free->next;
+  } else {
+    if(block_count >= MAXBLOCKS)
+      return 0;
+    b = &blocks[block_count++];
+  }
+  b->start = start;
+  b->pages = pages;
+  b->next = 0;
+  return b;
+}
+
+static void
+free_block_meta(struct block *b)
+{
+  b->next = meta_free;
+  meta_free = b;
+}
 
 void
 kinit()
@@ -46,19 +78,40 @@ freerange(void *pa_start, void *pa_end)
 void
 kfree(void *pa)
 {
-  struct run *r;
-
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
-  r = (struct run*)pa;
-
   acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+
+  struct block *prev = 0, *curr = kmem.freelist;
+  struct block *newb = alloc_block((char*)pa, 1);
+  if(newb == 0)
+    panic("kfree: out of metadata");
+
+  while(curr && curr->start < newb->start){
+    prev = curr;
+    curr = curr->next;
+  }
+  newb->next = curr;
+  if(prev)
+    prev->next = newb;
+  else
+    kmem.freelist = newb;
+
+  if(newb->next && newb->start + newb->pages * PGSIZE == newb->next->start){
+    newb->pages += newb->next->pages;
+    struct block *next = newb->next;
+    newb->next = newb->next->next;
+    free_block_meta(next);
+  }
+  if(prev && prev->start + prev->pages * PGSIZE == newb->start){
+    prev->pages += newb->pages;
+    prev->next = newb->next;
+    free_block_meta(newb);
+  }
+
   release(&kmem.lock);
 }
 
@@ -68,15 +121,35 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct block *best = 0, *bestprev = 0;
+  struct block *prev = 0, *curr;
 
   acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+  for(curr = kmem.freelist; curr; prev = curr, curr = curr->next){
+    if(curr->pages >= 1 && (!best || curr->pages < best->pages)){
+      best = curr;
+      bestprev = prev;
+    }
+  }
+
+  if(best == 0){
+    release(&kmem.lock);
+    return 0;
+  }
+
+  char *pa = best->start;
+  best->start += PGSIZE;
+  best->pages -= 1;
+  if(best->pages == 0){
+    if(bestprev)
+      bestprev->next = best->next;
+    else
+      kmem.freelist = best->next;
+    free_block_meta(best);
+  }
+
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  memset((char*)pa, 5, PGSIZE);
+  return (void*)pa;
 }

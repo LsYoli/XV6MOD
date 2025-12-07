@@ -81,6 +81,8 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#include "procinfo.h"
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +106,11 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // MLFQ scheduling data
+  int priority;                // 0 (high) - 2 (low)
+  int ticks[3];                // accumulated ticks per queue
+  int currentslice;            // ticks in current time slice
 };
+
+extern int mlfq_quanta[3];
